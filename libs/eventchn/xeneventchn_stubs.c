@@ -1,17 +1,17 @@
 /*
- * Copyright (C) 2006-2007 XenSource Ltd.
- * Copyright (C) 2008      Citrix Ltd.
- * Author Vincent Hanquez <vincent.hanquez@eu.citrix.com>
+ * Copyright (C) 2008-2014 Citrix Inc.
  *
- * This program is free software; you can redistribute it and/or modify
- * it under the terms of the GNU Lesser General Public License as published
- * by the Free Software Foundation; version 2.1 only. with the special
- * exception on linking described in file LICENSE.
+ * Permission to use, copy, modify, and distribute this software for any
+ * purpose with or without fee is hereby granted, provided that the above
+ * copyright notice and this permission notice appear in all copies.
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Lesser General Public License for more details.
+ * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+ * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+ * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+ * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+ * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+ * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
+ * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
 #include <sys/types.h>
@@ -21,8 +21,8 @@
 #include <errno.h>
 #include <stdint.h>
 #include <sys/ioctl.h>
-#include <xen/xen.h>
-#include <xen/sys/evtchn.h>
+#include <string.h>
+
 #include <xenevtchn.h>
 
 #define CAML_NAME_SPACE
@@ -32,137 +32,219 @@
 #include <caml/custom.h>
 #include <caml/callback.h>
 #include <caml/fail.h>
-#include <caml/signals.h>
+#include <caml/threads.h>
 
-#define _H(__h) ((xenevtchn_handle *)(__h))
-
-CAMLprim value stub_eventchn_init(void)
+static inline xenevtchn_handle *
+xce_of_val (value v)
 {
-	CAMLparam0();
-	CAMLlocal1(result);
-	xenevtchn_handle *xce;
-
-	caml_enter_blocking_section();
-	xce = xenevtchn_open(NULL, 0);
-	caml_leave_blocking_section();
-
-	if (xce == NULL)
-		caml_failwith("open failed");
-
-	result = (value)xce;
-	CAMLreturn(result);
+        return *(xenevtchn_handle **) Data_custom_val (v);
 }
 
-CAMLprim value stub_eventchn_fd(value xce)
+static void
+stub_evtchn_finalize (value v)
 {
-	CAMLparam1(xce);
-	CAMLlocal1(result);
-	int fd;
-
-	fd = xenevtchn_fd(_H(xce));
-	if (fd == -1)
-		caml_failwith("evtchn fd failed");
-
-	result = Val_int(fd);
-
-	CAMLreturn(result);
+        xenevtchn_close (xce_of_val (v));
 }
 
-CAMLprim value stub_eventchn_notify(value xce, value port)
+static struct custom_operations xenevtchn_ops = {
+        .identifier = "xenevtchn",
+        .finalize = stub_evtchn_finalize,
+        .compare = custom_compare_default,      /* Can't compare */
+        .hash = custom_hash_default,    /* Can't hash */
+        .serialize = custom_serialize_default,  /* Can't serialize */
+        .deserialize = custom_deserialize_default,      /* Can't deserialize */
+        .compare_ext = custom_compare_ext_default,      /* Can't compare */
+};
+
+CAMLprim value
+stub_evtchn_init (value cloexec)
 {
-	CAMLparam2(xce, port);
-	int rc;
+        CAMLparam1 (cloexec);
+        CAMLlocal1 (result);
+        xenevtchn_handle *xce;
+        unsigned int flags = 0;
 
-	caml_enter_blocking_section();
-	rc = xenevtchn_notify(_H(xce), Int_val(port));
-	caml_leave_blocking_section();
+        if (!Bool_val (cloexec))
+                flags |= XENEVTCHN_NO_CLOEXEC;
 
-	if (rc == -1)
-		caml_failwith("evtchn notify failed");
+        result = caml_alloc_custom (&xenevtchn_ops, sizeof (xce), 0, 1);
 
-	CAMLreturn(Val_unit);
+        caml_release_runtime_system ();
+        xce = xenevtchn_open (NULL, flags);
+        caml_acquire_runtime_system ();
+
+        if (xce == NULL)
+          {
+                  caml_failwith (strerror (errno));
+          }
+
+        *(xenevtchn_handle **) Data_custom_val (result) = xce;
+        CAMLreturn (result);
 }
 
-CAMLprim value stub_eventchn_bind_interdomain(value xce, value domid,
-                                              value remote_port)
+CAMLprim value
+stub_evtchn_fd (value xce_val)
 {
-	CAMLparam3(xce, domid, remote_port);
-	CAMLlocal1(port);
-	xenevtchn_port_or_error_t rc;
+        CAMLparam1 (xce_val);
+        xenevtchn_handle *xce = xce_of_val (xce_val);
+        int fd;
 
-	caml_enter_blocking_section();
-	rc = xenevtchn_bind_interdomain(_H(xce), Int_val(domid), Int_val(remote_port));
-	caml_leave_blocking_section();
+        /* Don't drop the GC lock.  This is a simple read out of memory */
+        fd = xenevtchn_fd (xce);
+        if (fd == -1)
+          {
+                  caml_failwith (strerror (errno));
+          }
 
-	if (rc == -1)
-		caml_failwith("evtchn bind_interdomain failed");
-	port = Val_int(rc);
-
-	CAMLreturn(port);
+        CAMLreturn (Val_int (fd));
 }
 
-CAMLprim value stub_eventchn_bind_virq(value xce, value virq_type)
+CAMLprim value
+stub_evtchn_notify (value xce_val, value port_val)
 {
-	CAMLparam2(xce, virq_type);
-	CAMLlocal1(port);
-	xenevtchn_port_or_error_t rc;
+        CAMLparam2 (xce_val, port_val);
+        xenevtchn_handle *xce = xce_of_val (xce_val);
+        int rc;
+        int port = Int_val (port_val);
 
-	caml_enter_blocking_section();
-	rc = xenevtchn_bind_virq(_H(xce), Int_val(virq_type));
-	caml_leave_blocking_section();
+        caml_release_runtime_system ();
+        rc = xenevtchn_notify (xce, port);
+        caml_acquire_runtime_system ();
 
-	if (rc == -1)
-		caml_failwith("evtchn bind_virq failed");
-	port = Val_int(rc);
+        if (rc == -1)
+          {
+                  caml_failwith (strerror (errno));
+          }
 
-	CAMLreturn(port);
+        CAMLreturn (Val_unit);
 }
 
-CAMLprim value stub_eventchn_unbind(value xce, value port)
+CAMLprim value
+stub_evtchn_bind_interdomain (value xce_val, value domid_val,
+                              value remote_port_val)
 {
-	CAMLparam2(xce, port);
-	int rc;
+        CAMLparam3 (xce_val, domid_val, remote_port_val);
+        xenevtchn_handle *xce = xce_of_val (xce_val);
+        xenevtchn_port_or_error_t rc;
+        int domid = Int_val (domid_val);
+        int remote_port = Int_val (remote_port_val);
 
-	caml_enter_blocking_section();
-	rc = xenevtchn_unbind(_H(xce), Int_val(port));
-	caml_leave_blocking_section();
+        caml_release_runtime_system ();
+        rc = xenevtchn_bind_interdomain (xce, domid, remote_port);
+        caml_acquire_runtime_system ();
 
-	if (rc == -1)
-		caml_failwith("evtchn unbind failed");
+        if (rc == -1)
+          {
+                  caml_failwith (strerror (errno));
+          }
 
-	CAMLreturn(Val_unit);
+        CAMLreturn (Val_int (rc));
 }
 
-CAMLprim value stub_eventchn_pending(value xce)
+CAMLprim value
+stub_evtchn_alloc_unbound (value xce_val, value remote_domid_val)
 {
-	CAMLparam1(xce);
-	CAMLlocal1(result);
-	xenevtchn_port_or_error_t port;
+        CAMLparam2 (xce_val, remote_domid_val);
+        xenevtchn_handle *xce = xce_of_val (xce_val);
+        xenevtchn_port_or_error_t rc;
+        int remote_domid = Int_val (remote_domid_val);
 
-	caml_enter_blocking_section();
-	port = xenevtchn_pending(_H(xce));
-	caml_leave_blocking_section();
+        caml_release_runtime_system ();
+        rc = xenevtchn_bind_unbound_port (xce, remote_domid);
+        caml_acquire_runtime_system ();
+        if (rc == -1)
+          {
+                  caml_failwith (strerror (errno));
+          }
 
-	if (port == -1)
-		caml_failwith("evtchn pending failed");
-	result = Val_int(port);
+        CAMLreturn (Val_int (rc));
 
-	CAMLreturn(result);
 }
 
-CAMLprim value stub_eventchn_unmask(value xce, value _port)
+CAMLprim value
+stub_evtchn_virq_dom_exc (value unit)
 {
-	CAMLparam2(xce, _port);
-	evtchn_port_t port;
-	int rc;
+        CAMLparam1 (unit);
+        CAMLreturn (Val_int (VIRQ_DOM_EXC));
+}
 
-	port = Int_val(_port);
+CAMLprim value
+stub_evtchn_bind_virq (value xce_val, value virq_val)
+{
+        CAMLparam2 (xce_val, virq_val);
+        xenevtchn_port_or_error_t rc;
+        xenevtchn_handle *xce = xce_of_val (xce_val);
+        int virq = Int_val (virq_val);
 
-	caml_enter_blocking_section();
-	rc = xenevtchn_unmask(_H(xce), port);
-	caml_leave_blocking_section();
+        caml_release_runtime_system ();
+        rc = xenevtchn_bind_virq (xce, virq);
+        caml_acquire_runtime_system ();
+        if (rc == -1)
+          {
+                  caml_failwith (strerror (errno));
+          }
 
-	if (rc)
-		caml_failwith("evtchn unmask failed");
-	CAMLreturn(Val_unit);
+        CAMLreturn (Val_int (rc));
+}
+
+CAMLprim value
+stub_evtchn_unbind (value xce_val, value port_val)
+{
+        CAMLparam2 (xce_val, port_val);
+        xenevtchn_handle *xce = xce_of_val (xce_val);
+        int port = Int_val (port_val);
+        int rc;
+
+        caml_release_runtime_system ();
+        rc = xenevtchn_unbind (xce, port);
+        caml_acquire_runtime_system ();
+        if (rc == -1)
+          {
+                  caml_failwith (strerror (errno));
+          }
+
+        CAMLreturn (Val_unit);
+}
+
+CAMLprim value
+stub_evtchn_pending (value xce_val)
+{
+        CAMLparam1 (xce_val);
+        CAMLlocal1 (generation);
+        xenevtchn_port_or_error_t port;
+        xenevtchn_handle *xce = xce_of_val (xce_val);
+
+        generation = caml_alloc_tuple (2);
+
+        caml_release_runtime_system ();
+        port = xenevtchn_pending (xce);
+        caml_acquire_runtime_system ();
+        if (port == -1)
+          {
+                  caml_failwith (strerror (errno));
+          }
+
+        Store_field (generation, 0, Val_int (0));
+        Store_field (generation, 1, Val_int (port));
+
+        CAMLreturn (generation);
+}
+
+CAMLprim value
+stub_evtchn_unmask (value xce_val, value port_val)
+{
+        CAMLparam2 (xce_val, port_val);
+        xenevtchn_handle *xce = xce_of_val (xce_val);
+        int port = Int_val (port_val);
+        int rc;
+
+        caml_release_runtime_system ();
+        rc = xenevtchn_unmask (xce, port);
+        caml_acquire_runtime_system ();
+        if (rc == -1)
+          {
+                  caml_failwith (strerror (errno));
+          }
+
+        CAMLreturn (Val_unit);
 }
