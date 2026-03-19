@@ -14,11 +14,11 @@
  * GNU Lesser General Public License for more details.
  */
 
-struct caml_xtl {
-	xentoollog_logger vtable;
-	char *vmessage_cb;
-	char *progress_cb;
+struct caml_xtl
+{
+        xentoollog_logger vtable;
+        char *vmessage_cb;
+        char *progress_cb;
 };
 
 #define Xtl_val(x)(*((struct caml_xtl **) Data_custom_val(x)))
-

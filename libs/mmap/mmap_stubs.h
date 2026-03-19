@@ -26,8 +26,8 @@
 
 struct mmap_interface
 {
-	void *addr;
-	int len;
+        void *addr;
+        int len;
 };
 
 #endif
